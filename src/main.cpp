@@ -38,11 +38,26 @@ struct example {
     std::unique_ptr<nontrivial> p = std::make_unique<nontrivial>();
 };
 
+struct Node {
+    int value = 0;
+    std::unique_ptr<Node> next;
+
+    static auto make_list(int count) {
+        std::unique_ptr<Node> p;
+        for (int i = 0; i < 10; ++i) {
+            auto n = new Node{i, std::move(p)};
+            p = std::unique_ptr<Node>(n);
+        }
+        return p;
+    }
+};
+
 int main() {
-    example original;
+//    example original;
+    auto original = Node::make_list(10);
 
     auto data = dump(original);
-    auto loaded = load<example>(data);
+    auto loaded = load<decltype(original)>(data);
 
     return 0;
 }
