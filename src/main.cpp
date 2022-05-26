@@ -1,7 +1,6 @@
 #include <iostream>
 #include <set>
 #include <list>
-#include <cassert>
 
 #include "binary.hpp"
 
@@ -28,6 +27,10 @@ struct example {
 
     struct {
         std::vector<std::string> int_vector = {"A", "simple", "serialization", "library"};
+
+        std::optional<std::string> str = "Optional";
+        std::pair<int, std::string> pair = {5, "Five"};
+        std::tuple<int, double, bool> tuple = {10, 3.2, false};
     } nontrivial;
 };
 
