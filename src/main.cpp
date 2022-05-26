@@ -17,21 +17,25 @@ struct example {
     std::list<char> char_list = {'a', 'b', 'c'};
     std::set<double> double_set = {0.1, 0.2, 0.3, 0.5};
 
-    struct {
+    struct trivial {
         int a = 5;
         double b = 10.0;
         bool c = true;
         char d = 'd';
-    } trivial;
+    } t;
 
 
-    struct {
+    struct nontrivial {
         std::vector<std::string> int_vector = {"A", "simple", "serialization", "library"};
 
         std::optional<std::string> str = "Optional";
         std::pair<int, std::string> pair = {5, "Five"};
         std::tuple<int, double, bool> tuple = {10, 3.2, false};
-    } nontrivial;
+
+        trivial t;
+    } n;
+
+    std::unique_ptr<nontrivial> p = std::make_unique<nontrivial>();
 };
 
 int main() {

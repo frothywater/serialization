@@ -203,10 +203,32 @@ namespace binary {
         }
 
         static constexpr optional read(bytes_view &buffer) {
-            optional opt;
             bool has_value = serializer<bool>::read(buffer);
-            if (has_value) opt = std::move(serializer<T>::read(buffer));
-            return opt;
+            if (has_value) return std::move(serializer<T>::read(buffer));
+            return std::nullopt;
+        }
+    };
+
+    template<typename T>
+    struct serializer<std::unique_ptr<T>> {
+        using unique_ptr = std::unique_ptr<T>;
+
+        static constexpr auto length(const unique_ptr &ptr) {
+            std::size_t length = ptr ? 1 + serializer<T>::length(*ptr) : 1;
+            return length;
+        }
+
+        static constexpr auto write(const unique_ptr &ptr, writable_bytes_view buffer) {
+            // Serialize bool value of the pointer first.
+            auto bytes_written = serializer<bool>::write(ptr != nullptr, buffer);
+            if (ptr) bytes_written += serializer<T>::write(*ptr, buffer.subspan(1));
+            return bytes_written;
+        }
+
+        static constexpr unique_ptr read(bytes_view &buffer) {
+            bool has_value = serializer<bool>::read(buffer);
+            if (has_value) return std::make_unique<T>(serializer<T>::read(buffer));
+            return nullptr;
         }
     };
 
