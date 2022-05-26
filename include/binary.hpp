@@ -10,12 +10,15 @@
 
 #include <iostream>
 
+#include "tinyxml2.h"
 #include "boost/pfr.hpp"
 
-namespace binary {
+namespace serialization {
     using bytes = std::vector<std::byte>;
     using bytes_view = std::span<const std::byte>;
     using writable_bytes_view = std::span<std::byte>;
+
+    using namespace tinyxml2;
 
     // MARK: Declarations
 
@@ -95,6 +98,35 @@ namespace binary {
             buffer = buffer.subspan(sizeof(T));
             return value;
         }
+
+        static constexpr auto write_xml(const T &value, XMLDocument &doc) {
+            auto element = doc.NewElement(typeid(value).name());
+            if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>)
+                element->SetAttribute("value", static_cast<uint64_t>(value));
+            else if (std::is_integral_v<T> && std::is_signed_v<T>)
+                element->SetAttribute("value", static_cast<int64_t>(value));
+            else if (std::is_floating_point_v<T>)
+                element->SetAttribute("value", static_cast<double>(value));
+            return element;
+        }
+
+        static constexpr auto read_xml(const XMLElement &element) {
+            T value;
+            if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>) {
+                uint64_t v;
+                element.QueryAttribute("value", &v);
+                value = v;
+            } else if (std::is_integral_v<T> && std::is_signed_v<T>) {
+                int64_t v;
+                element.QueryAttribute("value", &v);
+                value = v;
+            } else if (std::is_floating_point_v<T>) {
+                double v;
+                element.QueryAttribute("value", &v);
+                value = v;
+            }
+            return value;
+        }
     };
 
     template<aggregate T>
@@ -122,6 +154,27 @@ namespace binary {
             boost::pfr::for_each_field(object, [&](auto &field) {
                 using field_type = std::remove_reference_t<decltype(field)>;
                 field = std::move(serializer<field_type>::read(buffer));
+            });
+            return object;
+        }
+
+        static constexpr auto write_xml(const T &object, XMLDocument &doc) {
+            auto parent = doc.NewElement(typeid(object).name());
+            boost::pfr::for_each_field(object, [&](const auto &field) {
+                using field_type = std::remove_cvref_t<decltype(field)>;
+                auto child = serializer<field_type>::write_xml(field, doc);
+                parent->InsertEndChild(child);
+            });
+            return parent;
+        }
+
+        static constexpr auto read_xml(const XMLElement &parent) {
+            T object;
+            auto child = parent.FirstChildElement();
+            boost::pfr::for_each_field(object, [&](auto &field) {
+                using field_type = std::remove_reference_t<decltype(field)>;
+                field = std::move(serializer<field_type>::read_xml(*child));
+                child = child->NextSiblingElement();
             });
             return object;
         }
@@ -154,6 +207,28 @@ namespace binary {
                 inserter = std::move(serializer<value_type>::read(buffer));
             return container;
         }
+
+        static constexpr auto write_xml(const T &container, XMLDocument &doc) {
+            auto parent = doc.NewElement(typeid(container).name());
+            parent->SetAttribute("size", static_cast<uint64_t>(std::ranges::size(container)));
+            for (const auto &item: container) {
+                auto child = serializer<value_type>::write_xml(item, doc);
+                parent->InsertEndChild(child);
+            }
+            return parent;
+        }
+
+        static constexpr auto read_xml(const XMLElement &parent) {
+            T container;
+            auto size = parent.Unsigned64Attribute("size");
+            auto child = parent.FirstChildElement();
+            auto inserter = std::inserter(container, std::end(container));
+            for (std::size_t i = 0; i < size; ++i) {
+                inserter = std::move(serializer<value_type>::read_xml(*child));
+                child = child->NextSiblingElement();
+            }
+            return container;
+        }
     };
 
     template<tuple_like T>
@@ -184,6 +259,27 @@ namespace binary {
             });
             return tuple;
         }
+
+        static constexpr auto write_xml(const T &tuple, XMLDocument &doc) {
+            auto parent = doc.NewElement(typeid(tuple).name());
+            for_each_element(tuple, [&](const auto &element) {
+                using element_type = std::remove_cvref_t<decltype(element)>;
+                auto child = serializer<element_type>::write_xml(element, doc);
+                parent->InsertEndChild(child);
+            });
+            return parent;
+        }
+
+        static constexpr auto read_xml(const XMLElement &parent) {
+            T tuple;
+            auto child = parent.FirstChildElement();
+            for_each_element(tuple, [&](auto &element) {
+                using element_type = std::remove_cvref_t<decltype(element)>;
+                element = std::move(serializer<element_type>::read_xml(*child));
+                child = child->NextSiblingElement();
+            });
+            return tuple;
+        }
     };
 
     template<typename T>
@@ -204,7 +300,23 @@ namespace binary {
 
         static constexpr optional read(bytes_view &buffer) {
             bool has_value = serializer<bool>::read(buffer);
-            if (has_value) return std::move(serializer<T>::read(buffer));
+            if (has_value) return serializer<T>::read(buffer);
+            return std::nullopt;
+        }
+
+        static constexpr auto write_xml(const optional &opt, XMLDocument &doc) {
+            auto element = doc.NewElement(typeid(opt).name());
+            element->SetAttribute("has_value", opt.has_value());
+            if (opt) {
+                auto child = serializer<T>::write_xml(*opt, doc);
+                element->InsertEndChild(child);
+            }
+            return element;
+        }
+
+        static constexpr optional read_xml(const XMLElement &parent) {
+            bool has_value = parent.BoolAttribute("has_value");
+            if (has_value) return serializer<T>::read_xml(*parent.FirstChildElement());
             return std::nullopt;
         }
     };
@@ -230,19 +342,53 @@ namespace binary {
             if (has_value) return std::make_unique<T>(serializer<T>::read(buffer));
             return nullptr;
         }
+
+        static constexpr auto write_xml(const unique_ptr &ptr, XMLDocument &doc) {
+            auto element = doc.NewElement(typeid(ptr).name());
+            element->SetAttribute("has_value", ptr != nullptr);
+            if (ptr) {
+                auto child = serializer<T>::write_xml(*ptr, doc);
+                element->InsertEndChild(child);
+            }
+            return element;
+        }
+
+        static constexpr unique_ptr read_xml(const XMLElement &parent) {
+            bool has_value = parent.BoolAttribute("has_value");
+            if (has_value) return std::make_unique<T>(serializer<T>::read_xml(*parent.FirstChildElement()));
+            return nullptr;
+        }
     };
 
     // MARK: Interface functions
-    template<serializable T>
-    auto dump(const T &obj) {
-        bytes buffer{serializer<T>::length(obj)};
-        serializer<T>::write(obj, buffer);
-        return buffer;
+
+    namespace binary {
+        template<serializable T>
+        auto dump(const T &obj) {
+            bytes buffer{serializer<T>::length(obj)};
+            serializer<T>::write(obj, buffer);
+            return buffer;
+        }
+
+        template<serializable T>
+        auto load(bytes_view buffer) {
+            return serializer<T>::read(buffer);
+        }
     }
 
-    template<serializable T>
-    auto load(bytes_view buffer) {
-        return serializer<T>::read(buffer);
+    namespace xml {
+        template<serializable T>
+        auto dump(const T &obj) {
+            auto doc = std::make_unique<XMLDocument>();
+            auto element = serializer<T>::write_xml(obj, *doc);
+            doc->InsertEndChild(element);
+            return doc;
+        }
+
+        template<serializable T>
+        auto load(const XMLDocument &doc) {
+            return serializer<T>::read_xml(*doc.RootElement());
+        }
     }
 
 }

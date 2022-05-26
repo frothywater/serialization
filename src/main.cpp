@@ -4,8 +4,6 @@
 
 #include "binary.hpp"
 
-using namespace binary;
-
 struct example {
     int a = 5;
     double b = 10.0;
@@ -53,11 +51,12 @@ struct Node {
 };
 
 int main() {
-//    example original;
-    auto original = Node::make_list(10);
+    example original;
+//    auto original = Node::make_list(10);
 
-    auto data = dump(original);
-    auto loaded = load<decltype(original)>(data);
+    auto data = serialization::xml::dump(original);
+    data->Print();
+    auto loaded = serialization::xml::load<decltype(original)>(*data);
 
     return 0;
 }
