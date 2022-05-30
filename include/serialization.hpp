@@ -102,7 +102,7 @@ namespace serialization {
                 return sizeof(T);
             }
 
-            static constexpr T read(bytes_view &buffer) {
+            static constexpr auto read(bytes_view &buffer) {
                 T value;
                 auto data = reinterpret_cast<std::byte *>(&value);
                 if (buffer.size() < sizeof(T)) throw parse_error{"Reached end of data"};
@@ -132,7 +132,7 @@ namespace serialization {
                 return bytes_written;
             }
 
-            static constexpr T read(bytes_view &buffer) {
+            static constexpr auto read(bytes_view &buffer) {
                 T object;
                 boost::pfr::for_each_field(object, [&](auto &field) {
                     using field_type = std::remove_reference_t<decltype(field)>;
@@ -161,7 +161,7 @@ namespace serialization {
                 return bytes_written;
             }
 
-            static constexpr T read(bytes_view &buffer) {
+            static constexpr auto read(bytes_view &buffer) {
                 T container;
                 regular auto size = serializer<std::size_t>::read(buffer);
                 auto inserter = std::inserter(container, std::end(container));
@@ -191,7 +191,7 @@ namespace serialization {
                 return bytes_written;
             }
 
-            static constexpr T read(bytes_view &buffer) {
+            static constexpr auto read(bytes_view &buffer) {
                 T tuple;
                 for_each_element(tuple, [&](auto &element) {
                     using element_type = std::remove_cvref_t<decltype(element)>;
