@@ -5,13 +5,13 @@
 #include <vector>
 #include <algorithm>
 #include <type_traits>
-#include <utility>
 #include <iostream>
 #include <fstream>
+#include <utility>
 
+#include "boost/pfr.hpp"
 #include "tinyxml2.h"
 #include "base64.h"
-#include "boost/pfr.hpp"
 
 namespace serialization {
 
@@ -52,6 +52,17 @@ namespace serialization {
     constexpr void for_each_element(T &&tuple, Func &&f) {
         constexpr auto size = std::tuple_size_v<std::remove_reference_t<T>>;
         for_range<0, size>([&](auto i) { f(std::get<i.value>(tuple)); });
+    }
+
+    template <typename T>
+    constexpr const char *tag_name() {
+        if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>)
+            return "unsigned_int";
+        else if (std::is_integral_v<T> && std::is_signed_v<T>)
+            return "int";
+        else if (std::is_floating_point_v<T>)
+            return "float";
+        else return "unknown";
     }
 
     // MARK: Error type
@@ -184,7 +195,9 @@ namespace serialization {
                 T tuple;
                 for_each_element(tuple, [&](auto &element) {
                     using element_type = std::remove_cvref_t<decltype(element)>;
-                    element = std::move(serializer<element_type>::read(buffer));
+                    // For `std::map`, element_type is `std::pair<const std::string, Value>`
+                    auto& elem = const_cast<element_type&>(element);
+                    elem = std::move(serializer<element_type>::read(buffer));
                 });
                 return tuple;
             }
@@ -248,17 +261,6 @@ namespace serialization {
             { xml_serializer<T, Base64>::write(v, std::declval<XMLDocument &>()) }  -> std::same_as<XMLElement *>;
             { xml_serializer<T, Base64>::read(std::declval<XMLElement &>()) }  -> std::same_as<T>;
         };
-
-        template <typename T>
-        constexpr const char *tag_name() {
-            if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>)
-                return "unsigned_int";
-            else if (std::is_integral_v<T> && std::is_signed_v<T>)
-                return "int";
-            else if (std::is_floating_point_v<T>)
-                return "float";
-            else return "unknown";
-        }
 
         // Text XML serializer (only support arithmetic)
         template<typename T> requires std::is_arithmetic_v<T>
@@ -390,7 +392,9 @@ namespace serialization {
                 for_each_element(tuple, [&](auto &element) {
                     using element_type = std::remove_cvref_t<decltype(element)>;
                     if (child == nullptr) throw parse_error{"Cannot find child element"};
-                    element = std::move(xml_serializer<element_type, Base64>::read(*child));
+                    // For `std::map`, element_type is `std::pair<const std::string, Value>`
+                    auto &elem = const_cast<element_type&>(element);
+                    elem = std::move(xml_serializer<element_type, Base64>::read(*child));
                     child = child->NextSiblingElement();
                 });
                 return tuple;
@@ -467,7 +471,7 @@ namespace serialization {
             bytes buffer{serializer<T>::length(obj)};
             serializer<T>::write(obj, buffer);
             std::ofstream file{path, std::ios::binary};
-            file.write(reinterpret_cast<const char *>(buffer.data()), buffer.size());
+            file.write(reinterpret_cast<const char *>(buffer.data()), static_cast<long>(buffer.size()));
         }
 
         template<serializable T>
