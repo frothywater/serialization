@@ -2,7 +2,7 @@
 #include <map>
 #include <list>
 
-#include "binary.hpp"
+#include "serialization.hpp"
 
 struct Example {
     // String
