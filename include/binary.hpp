@@ -2,15 +2,15 @@
 
 #include <span>
 #include <ranges>
-#include <algorithm>
 #include <vector>
+#include <algorithm>
 #include <type_traits>
 #include <utility>
-#include <functional>
-
 #include <iostream>
+#include <fstream>
 
 #include "tinyxml2.h"
+#include "base64.h"
 #include "boost/pfr.hpp"
 
 namespace serialization {
@@ -54,6 +54,11 @@ namespace serialization {
         for_range<0, size>([&](auto i) { f(std::get<i.value>(tuple)); });
     }
 
+    // MARK: Error type
+    struct parse_error : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+
     // MARK: Core serializers
 
     namespace binary {
@@ -89,6 +94,7 @@ namespace serialization {
             static constexpr T read(bytes_view &buffer) {
                 T value;
                 auto data = reinterpret_cast<std::byte *>(&value);
+                if (buffer.size() < sizeof(T)) throw parse_error{"Reached end of data"};
                 std::copy_n(buffer.data(), sizeof(T), data);
                 buffer = buffer.subspan(sizeof(T));
                 return value;
@@ -234,19 +240,31 @@ namespace serialization {
     namespace xml {
         using namespace tinyxml2;
 
-        template<typename T>
+        template<typename T, bool Base64 = false>
         struct xml_serializer {};
 
         // A type is serializable when there is a matched serializer for it.
-        template<typename T> concept xml_serializable = requires(T v) {
-            { xml_serializer<T>::write(v, std::declval<XMLDocument &>()) }  -> std::same_as<XMLElement*>;
-            { xml_serializer<T>::read(std::declval<XMLElement &>()) }  -> std::same_as<T>;
+        template<typename T, bool Base64> concept xml_serializable = requires(T v) {
+            { xml_serializer<T, Base64>::write(v, std::declval<XMLDocument &>()) }  -> std::same_as<XMLElement *>;
+            { xml_serializer<T, Base64>::read(std::declval<XMLElement &>()) }  -> std::same_as<T>;
         };
 
-        template<regular T>
-        struct xml_serializer<T> {
+        template <typename T>
+        constexpr const char *tag_name() {
+            if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>)
+                return "unsigned_int";
+            else if (std::is_integral_v<T> && std::is_signed_v<T>)
+                return "int";
+            else if (std::is_floating_point_v<T>)
+                return "float";
+            else return "unknown";
+        }
+
+        // Text XML serializer (only support arithmetic)
+        template<typename T> requires std::is_arithmetic_v<T>
+        struct xml_serializer<T, false> {
             static constexpr auto write(const T &value, XMLDocument &doc) {
-                auto element = doc.NewElement(typeid(value).name());
+                auto element = doc.NewElement(tag_name<T>());
                 if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>)
                     element->SetAttribute("value", static_cast<uint64_t>(value));
                 else if (std::is_integral_v<T> && std::is_signed_v<T>)
@@ -258,30 +276,54 @@ namespace serialization {
 
             static constexpr auto read(const XMLElement &element) {
                 T value;
+                auto attribute = element.FindAttribute("value");
+                if (attribute == nullptr) throw parse_error{"Cannot find attribute"};
                 if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>) {
                     uint64_t v;
-                    element.QueryAttribute("value", &v);
+                    attribute->QueryUnsigned64Value(&v);
                     value = v;
                 } else if (std::is_integral_v<T> && std::is_signed_v<T>) {
                     int64_t v;
-                    element.QueryAttribute("value", &v);
+                    attribute->QueryInt64Value(&v);
                     value = v;
                 } else if (std::is_floating_point_v<T>) {
                     double v;
-                    element.QueryAttribute("value", &v);
+                    attribute->QueryDoubleValue(&v);
                     value = v;
                 }
                 return value;
             }
         };
 
-        template <aggregate T>
-        struct xml_serializer<T> {
+        // Base-64 XML serializer
+        template<regular T>
+        struct xml_serializer<T, true> {
+            static auto write(const T &value, XMLDocument &doc) {
+                auto element = doc.NewElement(tag_name<T>());
+                auto data = std::string_view{reinterpret_cast<const char *>(&value)};
+                auto encoded = base64_encode(data);
+                element->SetAttribute("base64", encoded.c_str());
+                return element;
+            }
+
+            static auto read(const XMLElement &element) {
+                T value;
+                auto attribute = element.FindAttribute("base64");
+                if (attribute == nullptr) throw parse_error{"Cannot find attribute"};
+                auto decoded = base64_decode(static_cast<std::string_view>(attribute->Value()));
+                auto data = reinterpret_cast<char *>(&value);
+                std::copy_n(decoded.data(), sizeof(T), data);
+                return value;
+            }
+        };
+
+        template<aggregate T, bool Base64>
+        struct xml_serializer<T, Base64> {
             static constexpr auto write(const T &object, XMLDocument &doc) {
-                auto parent = doc.NewElement(typeid(object).name());
+                auto parent = doc.NewElement("aggregate");
                 boost::pfr::for_each_field(object, [&](const auto &field) {
                     using field_type = std::remove_cvref_t<decltype(field)>;
-                    auto child = xml_serializer<field_type>::write(field, doc);
+                    auto child = xml_serializer<field_type, Base64>::write(field, doc);
                     parent->InsertEndChild(child);
                 });
                 return parent;
@@ -292,22 +334,23 @@ namespace serialization {
                 auto child = parent.FirstChildElement();
                 boost::pfr::for_each_field(object, [&](auto &field) {
                     using field_type = std::remove_reference_t<decltype(field)>;
-                    field = std::move(xml_serializer<field_type>::read(*child));
+                    if (child == nullptr) throw parse_error{"Cannot find child element"};
+                    field = std::move(xml_serializer<field_type, Base64>::read(*child));
                     child = child->NextSiblingElement();
                 });
                 return object;
             }
         };
 
-        template <iterable T>
-        struct xml_serializer<T> {
+        template<iterable T, bool Base64>
+        struct xml_serializer<T, Base64> {
             using value_type = typename T::value_type;
 
             static constexpr auto write(const T &container, XMLDocument &doc) {
-                auto parent = doc.NewElement(typeid(container).name());
+                auto parent = doc.NewElement("iterable");
                 parent->SetAttribute("size", static_cast<uint64_t>(std::ranges::size(container)));
                 for (const auto &item: container) {
-                    auto child = xml_serializer<value_type>::write(item, doc);
+                    auto child = xml_serializer<value_type, Base64>::write(item, doc);
                     parent->InsertEndChild(child);
                 }
                 return parent;
@@ -315,24 +358,27 @@ namespace serialization {
 
             static constexpr auto read(const XMLElement &parent) {
                 T container;
-                auto size = parent.Unsigned64Attribute("size");
+                auto size_attribute = parent.FindAttribute("size");
+                if (size_attribute == nullptr) throw parse_error{"Cannot find size attribute"};
+                auto size = size_attribute->Unsigned64Value();
                 auto child = parent.FirstChildElement();
                 auto inserter = std::inserter(container, std::end(container));
                 for (std::size_t i = 0; i < size; ++i) {
-                    inserter = std::move(xml_serializer<value_type>::read(*child));
+                    if (child == nullptr) throw parse_error{"Cannot find child element"};
+                    inserter = std::move(xml_serializer<value_type, Base64>::read(*child));
                     child = child->NextSiblingElement();
                 }
                 return container;
             }
         };
 
-        template <tuple_like T>
-        struct xml_serializer<T> {
+        template<tuple_like T, bool Base64>
+        struct xml_serializer<T, Base64> {
             static constexpr auto write(const T &tuple, XMLDocument &doc) {
-                auto parent = doc.NewElement(typeid(tuple).name());
+                auto parent = doc.NewElement("tuple");
                 for_each_element(tuple, [&](const auto &element) {
                     using element_type = std::remove_cvref_t<decltype(element)>;
-                    auto child = xml_serializer<element_type>::write(element, doc);
+                    auto child = xml_serializer<element_type, Base64>::write(element, doc);
                     parent->InsertEndChild(child);
                 });
                 return parent;
@@ -343,51 +389,64 @@ namespace serialization {
                 auto child = parent.FirstChildElement();
                 for_each_element(tuple, [&](auto &element) {
                     using element_type = std::remove_cvref_t<decltype(element)>;
-                    element = std::move(xml_serializer<element_type>::read(*child));
+                    if (child == nullptr) throw parse_error{"Cannot find child element"};
+                    element = std::move(xml_serializer<element_type, Base64>::read(*child));
                     child = child->NextSiblingElement();
                 });
                 return tuple;
             }
         };
 
-        template <typename T>
-        struct xml_serializer<std::optional<T>> {
+        template<typename T, bool Base64>
+        struct xml_serializer<std::optional<T>, Base64> {
             using optional = std::optional<T>;
 
             static constexpr auto write(const optional &opt, XMLDocument &doc) {
-                auto element = doc.NewElement(typeid(opt).name());
+                auto element = doc.NewElement("optional");
                 element->SetAttribute("has_value", opt.has_value());
                 if (opt) {
-                    auto child = xml_serializer<T>::write(*opt, doc);
+                    auto child = xml_serializer<T, Base64>::write(*opt, doc);
                     element->InsertEndChild(child);
                 }
                 return element;
             }
 
             static constexpr optional read(const XMLElement &parent) {
-                bool has_value = parent.BoolAttribute("has_value");
-                if (has_value) return xml_serializer<T>::read(*parent.FirstChildElement());
+                auto has_value_attribute = parent.FindAttribute("has_value");
+                if (has_value_attribute == nullptr) throw parse_error{"Cannot find has_value attribute"};
+                bool has_value = has_value_attribute->BoolValue();
+                if (has_value) {
+                    auto child = parent.FirstChildElement();
+                    if (child == nullptr) throw parse_error{"Cannot find optional value element"};
+                    return xml_serializer<T, Base64>::read(*child);
+                }
                 return std::nullopt;
             }
         };
 
-        template <typename T>
-        struct xml_serializer<std::unique_ptr<T>> {
+        template<typename T, bool Base64>
+        struct xml_serializer<std::unique_ptr<T>, Base64> {
             using unique_ptr = std::unique_ptr<T>;
 
             static constexpr auto write(const unique_ptr &ptr, XMLDocument &doc) {
-                auto element = doc.NewElement(typeid(ptr).name());
+                auto element = doc.NewElement("unique_ptr");
                 element->SetAttribute("has_value", ptr != nullptr);
                 if (ptr) {
-                    auto child = xml_serializer<T>::write(*ptr, doc);
+                    auto child = xml_serializer<T, Base64>::write(*ptr, doc);
                     element->InsertEndChild(child);
                 }
                 return element;
             }
 
             static constexpr unique_ptr read(const XMLElement &parent) {
-                bool has_value = parent.BoolAttribute("has_value");
-                if (has_value) return std::make_unique<T>(xml_serializer<T>::read(*parent.FirstChildElement()));
+                auto has_value_attribute = parent.FindAttribute("has_value");
+                if (has_value_attribute == nullptr) throw parse_error{"Cannot find has_value attribute"};
+                bool has_value = has_value_attribute->BoolValue();
+                if (has_value) {
+                    auto child = parent.FirstChildElement();
+                    if (child == nullptr) throw parse_error{"Cannot find unique_ptr value element"};
+                    return std::make_unique<T>(xml_serializer<T, Base64>::read(*child));
+                }
                 return nullptr;
             }
         };
@@ -396,31 +455,53 @@ namespace serialization {
     // MARK: Interface functions
 
     namespace binary {
-        template<serializable T>
-        auto dump(const T &obj) {
-            bytes buffer{serializer<T>::length(obj)};
-            serializer<T>::write(obj, buffer);
-            return buffer;
+        auto get_file_length(std::ifstream &file) {
+            file.seekg(0, std::ios::end);
+            auto file_length = file.tellg();
+            file.seekg(0, std::ios::beg);
+            return file_length;
         }
 
         template<serializable T>
-        auto load(bytes_view buffer) {
+        void dump(const T &obj, const std::string &path) {
+            bytes buffer{serializer<T>::length(obj)};
+            serializer<T>::write(obj, buffer);
+            std::ofstream file{path, std::ios::binary};
+            file.write(reinterpret_cast<const char *>(buffer.data()), buffer.size());
+        }
+
+        template<serializable T>
+        auto load(const std::string &path) {
+            std::ifstream file{path, std::ios::binary};
+            file.unsetf(std::ios::skipws);
+            auto file_length = get_file_length(file);
+
+            bytes data(file_length);
+            file.read(reinterpret_cast<char *>(data.data()), file_length);
+            bytes_view buffer{data};
             return serializer<T>::read(buffer);
         }
     }
 
     namespace xml {
-        template<xml_serializable T>
-        auto dump(const T &obj) {
-            auto doc = std::make_unique<XMLDocument>();
-            auto element = xml_serializer<T>::write(obj, *doc);
-            doc->InsertEndChild(element);
-            return doc;
+        template<bool Base64 = false, typename T>
+        requires xml_serializable<T, Base64>
+        void dump(const T &obj, const std::string &path) {
+            XMLDocument doc;
+            auto element = xml_serializer<T, Base64>::write(obj, doc);
+            doc.InsertEndChild(element);
+            doc.SaveFile(path.c_str());
         }
 
-        template<xml_serializable T>
-        auto load(const XMLDocument &doc) {
-            return xml_serializer<T>::read(*doc.RootElement());
+        template<typename T, bool Base64 = false>
+        requires xml_serializable<T, Base64>
+        auto load(const std::string &path) {
+            XMLDocument doc;
+            auto code = doc.LoadFile(path.c_str());
+            if (code != tinyxml2::XML_SUCCESS) throw parse_error{"Invalid XML"};
+            auto root = doc.RootElement();
+            if (root == nullptr) throw parse_error{"Empty XML"};
+            return xml_serializer<T, Base64>::read(*root);
         }
     }
 

@@ -14,6 +14,6 @@ FetchContent_MakeAvailable(tinyxml2)
 include_directories(include)
 include_directories(tinyxml2)
 
-add_executable(serialization src/main.cpp include/binary.hpp)
+add_executable(serialization src/main.cpp src/base64.cpp)
 
 target_link_libraries(serialization PRIVATE tinyxml2)

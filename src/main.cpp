@@ -51,12 +51,14 @@ struct Node {
 };
 
 int main() {
-    example original;
-//    auto original = Node::make_list(10);
+//    example original;
+    auto original = Node::make_list(10);
 
-    auto data = serialization::xml::dump(original);
-    data->Print();
-    auto loaded = serialization::xml::load<decltype(original)>(*data);
+    serialization::xml::dump<>(original, "test.xml");
+    auto loaded = serialization::xml::load<decltype(original)>("test.xml");
+
+    serialization::binary::dump<>(original, "test.dat");
+    auto loaded_bin = serialization::binary::load<decltype(original)>("test.dat");
 
     return 0;
 }
